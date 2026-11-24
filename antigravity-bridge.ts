@@ -1,19 +1,62 @@
 /** Adds Antigravity CLI models to Pi Pocket and routes their workspace actions through Pi tools. */
 import type { Host, Web } from "./_pocket.d.ts";
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { obj, opt, str } from "@earendil-works/pi-schema";
-import {
-  createBridge,
-  type BridgeOptions,
-} from "./antigravity-bridge/provider.ts";
+import { arr, obj, opt, str } from "@earendil-works/pi-schema";
+import type { BridgeOptions } from "./antigravity-bridge/provider.ts";
 import {
   discover,
   FALLBACK_MODELS,
   toPiModel,
   type AgyModelEntry,
 } from "./antigravity-bridge/models.ts";
+
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
+
+async function imageBlock(path: string, remaining: number): Promise<[ImageContent, number]> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+  try {
+    const { size, isFile } = await file.stat().then((s) => ({ size: s.size, isFile: s.isFile() }));
+    if (!isFile || size === 0 || size > Math.min(MAX_IMAGE_BYTES, remaining))
+      throw new Error("Images must be nonempty regular files, at most 5 MiB each and 16 MiB total.");
+    const bytes = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+      const { bytesRead } = await file.read(bytes, offset, size - offset, offset);
+      if (!bytesRead) throw new Error("An image changed while being read.");
+      offset += bytesRead;
+    }
+    const prefix = bytes.subarray(0, 12);
+    const mimeType = prefix.subarray(0, 3).toString("hex") === "ffd8ff" ? "image/jpeg"
+      : prefix.subarray(0, 8).toString("hex") === "89504e470d0a1a0a" ? "image/png"
+      : /^GIF8[79]a$/.test(prefix.toString("latin1", 0, 6)) ? "image/gif"
+      : prefix.toString("latin1", 0, 4) === "RIFF" && prefix.toString("latin1", 8) === "WEBP" ? "image/webp"
+      : undefined;
+    if (!mimeType) throw new Error("Use a JPEG, PNG, GIF, or WebP image.");
+    return [{ type: "image", mimeType, data: bytes.toString("base64") }, size];
+  } finally {
+    await file.close();
+  }
+}
+
+// Pi Pocket reloads the entry point but caches helpers. Give this revision of
+// the provider a new import URL so the drop-in can update without a restart.
+const { createBridge } = (await import(
+  new URL("./antigravity-bridge/provider.ts?v=2026-11-24-images", import.meta.url).href
+)) as typeof import("./antigravity-bridge/provider.ts");
+
+// Pi Pocket's host supplies its normal file protection for paths in this tool's
+// string array (core automatically looks for path fields, not array strings).
+type ReadGuard = {
+  guard: {
+    judge(tool: "read", args: { path: string; source: string }, cwd: string):
+      Promise<{ decision: { action: string } } | undefined>;
+  };
+};
 
 export const pocketApi = 2;
 export default async function antigravityBridge(host: Host, web: Web) {
@@ -109,9 +152,13 @@ export default async function antigravityBridge(host: Host, web: Web) {
   const ask = defineTool({
     name: "antigravity_ask",
     description:
-      "Ask a text-only Antigravity model for a second opinion. It has no Pi tools or workspace access. Sends the supplied question to Google Antigravity.",
+      "Ask Antigravity for a second opinion. Sends the question and any attached images to Google Antigravity. The model has no Pi tools or workspace access.",
     parameters: obj({
       question: str({ minLength: 1, maxLength: 20_000 }),
+      images: opt(arr(str({ minLength: 1 }), {
+        maxItems: 8,
+        description: "Absolute local paths of images to attach (up to 8).",
+      })),
       model: opt(
         str({
           description:
@@ -127,11 +174,31 @@ export default async function antigravityBridge(host: Host, web: Web) {
       const model = target && api.models.getModel("antigravity", target);
       if (!model)
         throw new Error("No such Antigravity model. Check /agy-status.");
+      const images: ImageContent[] = [];
+      if (args.images?.length) {
+        const guard = (host as Host & Partial<ReadGuard>).guard;
+        if (!guard) throw new Error("Local image attachments need Pi Pocket file protection.");
+        let remaining = TOTAL_IMAGE_BYTES;
+        for (const path of args.images) {
+          if (!isAbsolute(path)) throw new Error("Image paths must be absolute.");
+          const source = await realpath(path);
+          const judgment = await guard.judge("read", { path, source }, "/");
+          if (judgment && judgment.decision.action !== "allow")
+            throw new Error("Pi Pocket does not allow reading one of the attached images.");
+          const [image, size] = await imageBlock(source, remaining);
+          images.push(image);
+          remaining -= size;
+        }
+      }
       const reply = await api.models.completeSimple(
         model,
         {
           messages: [
-            { role: "user", content: args.question, timestamp: Date.now() },
+            {
+              role: "user",
+              content: images.length ? [{ type: "text", text: args.question }, ...images] : args.question,
+              timestamp: Date.now(),
+            },
           ],
         },
         { telemetry: context.telemetry },

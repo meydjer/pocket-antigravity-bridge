@@ -7,7 +7,8 @@ A [Pi Pocket](https://github.com/TannerMidd/pi-pocket) drop-in extension that ad
 - It starts the official Antigravity CLI as `agy acp`, the [ACP server that Google documents for other clients](https://antigravity.google/docs/ide/extensions/acp/). Sign-in stays inside `agy`. This extension never reads or copies OAuth tokens.
 - `agy` runs a generated restricted agent with its native tools off.
 - Pi's tools reach the agent through an MCP server on `127.0.0.1` with a per-connection token. Each action runs as a normal Pi tool call, so Pi Pocket's cards, permissions, and Lancet Guard apply.
-- It also adds `antigravity_ask`, a text-only second-opinion tool, and the `/agy-status` command.
+- Images from Pi tools reach the model: when a tool result has an image, the bridge ends the ACP turn and starts a fresh one from Pi's transcript with the images inline (agy would otherwise offload them to a file path).
+- It also adds `antigravity_ask`, a second-opinion tool with no workspace access that accepts up to 8 image paths, and the `/agy-status` command.
 
 Not ported: the TUI pickers and dialogs, the installer, hindsight recall, the native approval gate, and the stream-json engine. See `HANDOFF.md` for details and known gaps.
 
