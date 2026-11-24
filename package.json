@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "for file in antigravity-bridge/*.cjs; do node --check \"$file\" || exit; done && .toolchain/node_modules/.bin/tsc --noEmit && node --test test/*.test.ts && node test/pocket-smoke.mjs"
+  }
+}
