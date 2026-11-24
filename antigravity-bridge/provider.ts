@@ -605,15 +605,13 @@ export function createBridge(
       let cell = cells.get(stateKey);
       if (cell?.busy) {
         if (cell.resume(reply, request, opts)) return reply.stream;
-        // Recover from durable history after an image handoff or an interrupted turn.
-        if (cell.dead || request.messages.at(-1)?.role === "user") {
-          cell.close();
-          cells.delete(stateKey);
-          cell = undefined;
-        } else
-          throw new Error(
-            "Antigravity cannot match this reply to the active Pi tool call.",
-          );
+        // The live ACP turn no longer matches Pi's transcript: an image handoff,
+        // a compaction during a tool call, an edited history, or an interrupted
+        // turn. Pi's durable transcript is the truth, so restart from it.
+        trace("ACP handoff mismatch: recovering from Pi history");
+        cell.close();
+        cells.delete(stateKey);
+        cell = undefined;
       }
       // A Pi tool can outlive the ACP process, a module reload, or a server restart.
       const last = request.messages.at(-1);

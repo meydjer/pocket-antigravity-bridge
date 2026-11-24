@@ -194,6 +194,24 @@ test("a Pi image result starts a fresh ACP turn with the exact inline image", as
   }
 });
 
+test("a compaction during a Pi tool call recovers from Pi history", async () => {
+  const { bridge, close } = await setup();
+  const opts = { sessionId: "compaction" };
+  try {
+    const history = [...sys, user("round-trip")];
+    const call = await bridge.streamSimple(model, transcript(history), opts).result();
+    assert.equal(call.stopReason, "toolUse", call.errorMessage ?? "");
+    // Pi compacts while the tool runs: the prefix before the call changes.
+    const compacted = [...sys, user("Summary of the earlier work. round-trip")];
+    const answer = await bridge
+      .streamSimple(model, transcript(continuation(compacted, call)), opts)
+      .result();
+    assert.notEqual(answer.stopReason, "error", answer.errorMessage ?? "");
+  } finally {
+    await close();
+  }
+});
+
 for (const [scenario, guidance] of [
   ["auth", /Run `agy` in a terminal on the server to sign in/],
   ["quota", /quota or rate limit.*Wait and retry/],
