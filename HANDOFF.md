@@ -2,19 +2,20 @@
 
 ## State
 
-Port of `@firespoon/pi-antigravity-bridge` 1.10.16 (MIT; see `LICENSE`). Installed in `~/.pi-pocket/extensions/antigravity-bridge.ts` with helpers in `~/.pi-pocket/extensions/antigravity-bridge/`. The live drop-in is **off**. No Pi Pocket settings or source changed.
+Port of `@firespoon/pi-antigravity-bridge` 1.10.16 (MIT; see `LICENSE`). The live drop-in is enabled under `/data/extensions/`. This revision has not been installed or tested against live agy. No Pi Pocket settings or source changed.
 
-## Turn it on
+## Use and reload
 
-1. As the Pi Pocket owner, confirm that `agy models` works in the server account. Use the official `agy` sign-in if needed.
-2. Review the code, then turn on **Antigravity Bridge** in **Menu → Extensions**. Run `/agy-status doctor` to check discovery. The provider starts with a fallback list and replaces it when discovery succeeds.
-3. Select `antigravity/gemini-3-8-flash` and a thinking level. On this account, `low`, `medium` and `high` map to the Flash variants. For a second opinion from another provider, use the `antigravity_ask` tool. It takes a text question and has no workspace tools.
+- **Menu → Refresh models** runs `agy models` and replaces the catalog. A local refresh does not call agy. If discovery fails, the bridge keeps the last list. A new load starts with fallback models and tries discovery in the background.
+- Run `/agy-status doctor` in Pi Pocket to check the catalog and agy version. It warns if the version differs from 1.5.16. If agy needs sign-in, run `agy` in a terminal on the server, then try again. For a quota or rate limit, wait or select another provider.
+- For a saved model with a removed `-xhigh` suffix, select the base model and set thinking to `xhigh`.
+- Install the helpers before the entry file. The module uses static imports for gallery review. Pi Pocket caches helpers. Changes to a helper must wait for a server restart, even if you save the entry file or turn the module off and on. The first upgrade from the old mixed static and dynamic imports can use cached helpers: check with `/agy-status doctor`.
 
-Optional config: `antigravity-bridge/config.json` in the Pi Pocket data folder. Default: `{"binary":"agy","sendSystemPrompt":true}`. If the server cannot find `agy`, set `binary` to the absolute executable path. Turn the extension off and on to read new settings. The extension sends the prompt, selected transcript context, and requested tool results to Google. Only enable it for a server where the owner authorizes that use of the account. Do not put secrets in prompts or tool results.
+Optional config: `antigravity-bridge/config.json` in the Pi Pocket data folder. Default: `{"binary":"agy","sendSystemPrompt":true}`. If the server cannot find agy, set `binary` to its absolute path. The extension sends prompt context and requested tool results to Google. Do not put secrets in prompts or tool results.
 
 ## Checks
 
-Tested with Node 24 and `agy` 1.5.16. In this repo, link the Pi Pocket types and packages if they are not already linked:
+Tested with Node 24 and agy 1.5.16. Link Pi Pocket's types and packages if the repo lacks the links:
 
 ```sh
 ln -s ~/.pi-pocket/extensions/node_modules node_modules
@@ -23,11 +24,10 @@ npm ci --prefix .toolchain
 npm run check
 ```
 
-`npm run check` checks the carrier gate syntax, typechecks the port, runs 5 tests and runs the mocked ACP peer against an isolated Pi Pocket app. The app's Extensions status reports `enabled: false` and no error before the test enables its **copy**. The test then proves model registration and a real Pi `read` call. The lead session also ran `PI_POCKET_AGY_TRACE=1 node test/pocket-smoke.mjs --live` with the owner's approval. Gemini Flash (low) completed one Pi `read` of the synthetic file and returned `synthetic-fixture-content`. This command uses quota; the default checks do not.
+The check runs syntax checks, type checks, 9 tests, and an isolated Pi Pocket smoke test. It covers tool handoff, image forwarding, validation of image paths, model refresh, and ACP errors. It uses only mocks. After installation, check **Menu → Extensions** for an error and run `/agy-status doctor`. For one live turn, with the owner's approval, run `node test/pocket-smoke.mjs --live` in this repo. That command uses quota.
 
-## What is different from the Pi package
+## Limits
 
-- The restricted ACP agent runs in a private work folder. Its localhost MCP endpoint uses a per-connection token. The hook denies native and foreign calls; Pi Pocket executes and checks bridge calls as ordinary Pi tools. The hook is not an OS sandbox.
-- Streams text and thinking, reports ACP usage when available, passes image blocks, and supports cancellation and long tool calls. Image tool results restart the ACP turn from Pi's transcript with inline images (at most 8, 24 MB base64); this was checked live with Gemini 4 Hydrogen. `antigravity_ask` takes up to 8 absolute image paths (5 MiB each, 16 MiB total), checked by Pi Pocket's read guard (`host.guard`, an undocumented host member). Long calls are not tested live. A cancellation during a Pi tool handoff may leave ACP waiting until recovery or the turn deadline.
-- Reuses live ACP sessions. After a restart, removal, or incompatible context change, starts ACP again with bounded Pi history and completed tool results. Does not use `session/load` or replay old calls. ACP retains its own application data under the agy account. Provider cost is shown as zero; Google still applies its quota.
-- No TUI, installer, hindsight recall, native approval dialog, or stream-JSON engine. MCP uses HTTP JSON responses, not an SSE listener. Tested `agy` works without SSE.
+- The bridge uses a private work folder and a localhost MCP endpoint with a per-connection token. Its hook denies native and foreign calls. Pi Pocket checks bridge calls as ordinary Pi tools. The hook is not an OS sandbox.
+- For image tool results, it starts a new ACP turn from Pi's transcript with inline images (up to 8 and 24 MB of base64). `antigravity_ask` accepts up to 8 absolute image paths (5 MiB per file, 16 MiB total) from the session's local working folder or `uploads/<conversationId>` in the Pi Pocket data folder. The bridge checks real paths, so a symlink out of these folders does not grant access. This uses the experimental `host.cwdOf` API (Pi Pocket 0.28.0 or later).
+- The bridge reuses ACP sessions and recovers from Pi history without replaying tool calls. A cancellation during tool handoff can leave ACP waiting until recovery or the turn deadline. ACP retains its own data. Provider cost shows as zero, but Google still applies its quota.

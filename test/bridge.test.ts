@@ -65,7 +65,13 @@ async function setup(pollMs = 500) {
     },
   };
 }
-function continuation(history: Message[], assistant: Message): Message[] {
+function continuation(
+  history: Message[],
+  assistant: Message,
+  content: Extract<Message, { role: "toolResult" }>["content"] = [
+    { type: "text", text: "synthetic-fixture-content" },
+  ],
+): Message[] {
   assert.equal(assistant.role, "assistant");
   assert.equal(assistant.stopReason, "toolUse");
   const tool = assistant.content.find((b) => b.type === "toolCall")!;
@@ -81,7 +87,7 @@ function continuation(history: Message[], assistant: Message): Message[] {
       toolCallId: tool.id,
       isError: false,
       timestamp: Date.now(),
-      content: [{ type: "text", text: "synthetic-fixture-content" }],
+      content,
     },
   ];
 }
@@ -110,7 +116,7 @@ test("carrier gate permits private MCP and denies native and foreign calls", () 
 
 test("model discovery groups verified effort tiers, excludes retired models, and clamps effort", () => {
   const all = entriesFromRaw(
-    "gemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.8-flash-low\tGemini 3.8 Flash\nclaude-sonnet-4-6\tClaude\ngpt-oss-120b-medium\nAvailable models:",
+    "gemini-3.8-flash-xhigh\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.8-flash-low\tGemini 3.8 Flash\nclaude-sonnet-4-6\tClaude\ngpt-oss-120b-medium\nAvailable models:",
   );
   assert.deepEqual(
     all.map((m) => m.id),
@@ -118,6 +124,8 @@ test("model discovery groups verified effort tiers, excludes retired models, and
   );
   assert.equal(toAgyEffort("medium", all[0].efforts!), "high");
   assert.equal(toAgyEffort(undefined, all[0].efforts!), "low");
+  assert.equal(toAgyEffort("xhigh", all[0].efforts!), "xhigh");
+  assert.equal(toPiModel(all[0]).thinkingLevelMap?.xhigh, "xhigh");
 });
 
 for (const slow of [false, true])
@@ -169,6 +177,40 @@ for (const slow of [false, true])
       await close();
     }
   });
+
+test("a Pi image result starts a fresh ACP turn with the exact inline image", async () => {
+  const { bridge, close } = await setup();
+  const opts = { sessionId: "image" };
+  const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ1sAAAAASUVORK5CYII=";
+  try {
+    const history = [...sys, user("round-trip image-test")];
+    const first = await bridge.streamSimple(model, transcript(history), opts).result();
+    const messages = continuation(history, first, [{ type: "image", mimeType: "image/png", data }]);
+    const answer = await bridge.streamSimple(model, transcript(messages), opts).result();
+    assert.equal(answer.stopReason, "stop", answer.errorMessage ?? "");
+    assert.deepEqual(answer.content, [{ type: "text", text: `inline image: ${data}` }]);
+  } finally {
+    await close();
+  }
+});
+
+for (const [scenario, guidance] of [
+  ["auth", /Run `agy` in a terminal on the server to sign in/],
+  ["quota", /quota or rate limit.*Wait and retry/],
+  ["rate", /quota or rate limit.*Wait and retry/],
+] as const) {
+  test(`ACP ${scenario} error ends the turn with guidance`, async () => {
+    const { bridge, close } = await setup();
+    try {
+      const reply = await bridge.streamSimple(model, transcript([user(`error-test:${scenario}`)]), { sessionId: scenario }).result();
+      assert.equal(reply.stopReason, "error");
+      assert.match(reply.errorMessage ?? "", guidance);
+      assert.doesNotMatch(reply.errorMessage ?? "", /internal details/);
+    } finally {
+      await close();
+    }
+  });
+}
 
 test("an aborted stream settles and disposes its ACP connection", async () => {
   const { bridge, close } = await setup();

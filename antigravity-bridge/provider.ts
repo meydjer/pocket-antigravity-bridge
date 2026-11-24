@@ -12,17 +12,7 @@ import {
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { openAcp, safeError } from "./acp.ts";
-import {
-  dict,
-  openMcp,
-  POLL,
-  result,
-  SERVER,
-  trace,
-  type Dict,
-  type McpResult,
-  type McpTool,
-} from "./mcp.ts";
+import { dict, openMcp, POLL, result, SERVER, trace, type Dict, type McpResult, type McpTool } from "./mcp.ts";
 import { type AgyModelEntry, toAgyEffort } from "./models.ts";
 
 export type BridgeOptions = {

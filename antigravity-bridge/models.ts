@@ -133,12 +133,6 @@ export function entriesFromRaw(raw: string): AgyModelEntry[] {
       EFFORT_CAPABLE_FAMILIES.some((re) => re.test(base))
     ) {
       entries.push({ full: base, id: slugify(base), efforts });
-      // Older bridge versions registered this qualified id as a fixed model.
-      // Keep saved selections and sessions using that id resolvable.
-      if (efforts.includes("xhigh")) {
-        const full = `${base}-xhigh`;
-        entries.push({ full, id: slugify(full) });
-      }
     } else {
       for (const line of g.lines)
         entries.push({ full: line, id: slugify(line) });
@@ -233,6 +227,23 @@ export const FALLBACK_MODELS: AgyModelEntry[] = [
     efforts: ["low", "medium", "high"],
   },
 ];
+
+export async function versionStatus(bin: string, signal?: AbortSignal) {
+  const tested = "1.5.16";
+  try {
+    const { stdout } = await promisify(execFile)(bin, ["--version"], {
+      timeout: 3000,
+      maxBuffer: 4096,
+      signal,
+    });
+    const version = stdout.match(/\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/)?.[0];
+    if (version)
+      return `agy --version: ${version}.${version === tested ? "" : ` Warning: tested with ${tested}.`}`;
+  } catch {
+    // Do not expose raw CLI output.
+  }
+  return "Could not read `agy --version`. Check the configured binary and PATH.";
+}
 
 export async function discover(bin: string, signal?: AbortSignal) {
   try {

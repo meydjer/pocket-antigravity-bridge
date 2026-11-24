@@ -1,18 +1,13 @@
-/** Adds Antigravity CLI models to Pi Pocket and routes their workspace actions through Pi tools. */
+/** Adds Antigravity models through the local `agy` CLI. When enabled or refreshed, the CLI contacts Google Antigravity to list models. During turns, it sends prompts, transcript context, tool results, and images to Google Antigravity. The bridge serves an MCP endpoint on 127.0.0.1 with a per-connection token and routes workspace actions through Pi tools. It reads its optional config and writes temporary ACP agent config and workspaces only under `antigravity-bridge/` in the Pi Pocket data folder. The CLI uses and manages its own sign-in and app data under `~/.gemini/antigravity-cli`; the bridge does not read sign-in files. `antigravity_ask` reads selected images only from the current session's local working folder (using the experimental `host.cwdOf` API) or its own Pi Pocket uploads folder. */
 import type { Host, Web } from "./_pocket.d.ts";
 import { constants } from "node:fs";
 import { open, readFile, realpath } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { arr, obj, opt, str } from "@earendil-works/pi-schema";
-import type { BridgeOptions } from "./antigravity-bridge/provider.ts";
-import {
-  discover,
-  FALLBACK_MODELS,
-  toPiModel,
-  type AgyModelEntry,
-} from "./antigravity-bridge/models.ts";
+import { createBridge, type BridgeOptions } from "./antigravity-bridge/provider.ts";
+import { discover, FALLBACK_MODELS, toPiModel, versionStatus } from "./antigravity-bridge/models.ts";
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
@@ -43,20 +38,33 @@ async function imageBlock(path: string, remaining: number): Promise<[ImageConten
   }
 }
 
-// Pi Pocket reloads the entry point but caches helpers. Give this revision of
-// the provider a new import URL so the drop-in can update without a restart.
-const { createBridge } = (await import(
-  new URL("./antigravity-bridge/provider.ts?v=2026-11-24-images", import.meta.url).href
-)) as typeof import("./antigravity-bridge/provider.ts");
+const realPath = (path: string) => realpath(path).catch(() => undefined);
+function inside(root: string, path: string) {
+  const name = relative(root, path);
+  return name !== ".." && !name.startsWith(`..${sep}`) && !isAbsolute(name);
+}
 
-// Pi Pocket's host supplies its normal file protection for paths in this tool's
-// string array (core automatically looks for path fields, not array strings).
-type ReadGuard = {
-  guard: {
-    judge(tool: "read", args: { path: string; source: string }, cwd: string):
-      Promise<{ decision: { action: string } } | undefined>;
-  };
-};
+async function imageSource(host: Host, session: Parameters<Host["cwdOf"]>[0], path: string) {
+  if (!isAbsolute(path)) throw new Error("Image paths must be absolute.");
+  const cwd = host.cwdOf(session);
+  const [source, work, data] = await Promise.all([
+    realPath(path),
+    isAbsolute(cwd) ? realPath(cwd) : undefined,
+    realPath(host.dataDir),
+  ]);
+  if (!source) throw new Error("Could not find the image file.");
+  if (data) {
+    const uploads = join(data, "uploads");
+    const ownUploads = join(uploads, String(session));
+    if (inside(uploads, source) && inside(ownUploads, source) && await realPath(ownUploads) === ownUploads)
+      return source;
+    // A broad working directory must not grant access to other sessions' uploads.
+    if (inside(uploads, source))
+      throw new Error("Images must be inside this session's working folder or uploads folder.");
+  }
+  if (work && inside(work, source)) return source;
+  throw new Error("Images must be inside this session's working folder or uploads folder.");
+}
 
 export const pocketApi = 2;
 export default async function antigravityBridge(host: Host, web: Web) {
@@ -100,29 +108,42 @@ export default async function antigravityBridge(host: Host, web: Web) {
     bridge.dispose();
     removeProvider?.();
   });
-  function register(entries: AgyModelEntry[]) {
+  const currentModels = () => [...models.values()].map((m) => toPiModel(m, ["text", "image"]));
+  async function updateCatalog(signal: AbortSignal) {
+    const entries = await discover(options.bin, signal);
+    if (signal.aborted) return false;
+    if (!entries.length) {
+      status = "agy did not list models. Run `agy models` in the server account to check sign-in and PATH. The last model list is still in use.";
+      return false;
+    }
+    models.clear();
+    for (const m of entries) models.set(m.id, m);
+    status = `agy lists ${entries.length} models: ${entries.map((e) => e.id).join(", ")}.`;
+    return true;
+  }
+  function register() {
     const unregister = host.registerModelProvider("antigravity", {
       api: "pocket-agy-acp",
       baseUrl: "pocket-agy-acp://antigravity",
       apiKey: "antigravity-local-cli",
       streamSimple: bridge.streamSimple,
-      models: entries.map((m) => toPiModel(m, ["text", "image"])),
+      models: currentModels(),
+      async refreshModels({ allowNetwork, signal }) {
+        if (allowNetwork) await updateCatalog(AbortSignal.any([signal, lifecycle.signal]));
+        return currentModels();
+      },
     });
     removeProvider?.();
     removeProvider = unregister;
-    models.clear();
-    for (const m of entries) models.set(m.id, m);
   }
-  register(FALLBACK_MODELS);
+  register();
   function refresh() {
-    discovery ??= discover(options.bin, lifecycle.signal)
-      .then((entries) => {
-        if (lifecycle.signal.aborted) return status;
-        if (!entries.length)
-          return (status =
-            "agy did not list models. Run `agy models` in the server account to check sign-in and PATH. The last model list is still in use.");
-        register(entries);
-        return (status = `agy lists ${entries.length} models: ${entries.map((e) => e.id).join(", ")}.`);
+    // Startup and doctor are outside the runtime refresh callback, so register
+    // again to publish their result through the host's local refresh.
+    discovery ??= updateCatalog(lifecycle.signal)
+      .then((changed) => {
+        if (changed && !lifecycle.signal.aborted) register();
+        return status;
       })
       .catch(() => (status = "Could not refresh the Antigravity model list."))
       .finally(() => {
@@ -143,21 +164,21 @@ export default async function antigravityBridge(host: Host, web: Web) {
       const action = args.trim();
       if (action && action !== "doctor")
         throw web.error(400, "Use /agy-status or /agy-status doctor.");
-      return {
-        type: "card",
-        output: action === "doctor" ? await refresh() : status,
-      };
+      const output = action === "doctor"
+        ? (await Promise.all([refresh(), versionStatus(options.bin, lifecycle.signal)])).join("\n")
+        : status;
+      return { type: "card", output };
     },
   });
   const ask = defineTool({
     name: "antigravity_ask",
     description:
-      "Ask Antigravity for a second opinion. Sends the question and any attached images to Google Antigravity. The model has no Pi tools or workspace access.",
+      "Start the local agy CLI to ask Antigravity for a second opinion. Sends the question and selected session images to Google Antigravity. The model has no Pi tools or workspace access.",
     parameters: obj({
       question: str({ minLength: 1, maxLength: 20_000 }),
       images: opt(arr(str({ minLength: 1 }), {
         maxItems: 8,
-        description: "Absolute local paths of images to attach (up to 8).",
+        description: "Up to 8 absolute image paths inside this session's working folder or uploads folder.",
       })),
       model: opt(
         str({
@@ -176,15 +197,9 @@ export default async function antigravityBridge(host: Host, web: Web) {
         throw new Error("No such Antigravity model. Check /agy-status.");
       const images: ImageContent[] = [];
       if (args.images?.length) {
-        const guard = (host as Host & Partial<ReadGuard>).guard;
-        if (!guard) throw new Error("Local image attachments need Pi Pocket file protection.");
         let remaining = TOTAL_IMAGE_BYTES;
         for (const path of args.images) {
-          if (!isAbsolute(path)) throw new Error("Image paths must be absolute.");
-          const source = await realpath(path);
-          const judgment = await guard.judge("read", { path, source }, "/");
-          if (judgment && judgment.decision.action !== "allow")
-            throw new Error("Pi Pocket does not allow reading one of the attached images.");
+          const source = await imageSource(host, api.conversationId, path);
           const [image, size] = await imageBlock(source, remaining);
           images.push(image);
           remaining -= size;

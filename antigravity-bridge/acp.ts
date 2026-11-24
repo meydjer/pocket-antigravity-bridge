@@ -19,8 +19,12 @@ const gate = fileURLToPath(new URL("./native-gate.cjs", import.meta.url));
 const shellQuote = (part: string) => "'" + part.replaceAll("'", "'\\''") + "'";
 
 export function safeError(error: unknown) {
-  if (error instanceof JsonRpcResponseError && error.code === -32000) {
-    return "Antigravity needs Google sign-in or could not connect. Run `agy models` in the server account, then retry.";
+  if (error instanceof JsonRpcResponseError) {
+    const detail = `${error.message} ${JSON.stringify(error.data) ?? ""}`;
+    if (error.code === -32000 && /authentication required/i.test(detail))
+      return "Antigravity needs sign-in. Run `agy` in a terminal on the server to sign in, then retry.";
+    if (error.code === 429 || /\b(quota|rate[ _-]?limit|too many requests|resource[ _-]exhausted)\b/i.test(detail))
+      return "Antigravity reached a quota or rate limit. Wait and retry, or select another provider.";
   }
   // Never show raw CLI errors, stderr, MCP credentials or ACP payloads.
   return "Antigravity ACP could not complete this request. Check `/agy-status doctor` and the installed agy version.";
@@ -75,7 +79,6 @@ export async function openAcp(opts: {
       "antigravity-cli",
     );
     // Only agy's own application data is shared for sign-in. Do not copy global agents, hooks, or MCP config.
-    await mkdir(appData, { recursive: true, mode: 0o700 });
     await mkdir(cwd, { mode: 0o700 });
     await mkdir(agentDir, { recursive: true, mode: 0o700 });
     await symlink(appData, join(home, "antigravity-cli"), "dir");

@@ -72,10 +72,27 @@ async function handle({ id, method, params }) {
     .join("\n");
   prompt = id;
   if (input.includes("cancel-test")) return;
+  const simulated = {
+    auth: { code: -32000, message: "Authentication required", data: "internal details" },
+    quota: { code: -32000, message: "Provider error", data: { status: "RESOURCE_EXHAUSTED", detail: "internal details" } },
+    rate: { code: 429, message: "internal details" },
+  }[/error-test:(auth|quota|rate)/.exec(input)?.[1]];
+  if (simulated) return send({ id, error: simulated });
   const listed = (await (await post("tools/list", {})).json()).result.tools.map(
     (x) => x.name,
   );
-  if (
+  if (input.includes("Pi Pocket history") && input.includes("image-test")) {
+    const images = params.prompt.filter((block) => block.type === "image");
+    // One prompt in this ACP process: a reused session would have calls > 1.
+    if (calls !== 1 || images.length !== 1 || images[0].mimeType !== "image/png" || images[0].uri)
+      throw new Error("Expected a fresh ACP session with an inline PNG");
+    update("agent_message_chunk", `inline image: ${images[0].data}`);
+  } else if (input === "inline-ask-test") {
+    const images = params.prompt.filter((block) => block.type === "image");
+    if (listed.length || images.length !== 1 || images[0].mimeType !== "image/png")
+      throw new Error("Expected an inline PNG and no tools");
+    update("agent_message_chunk", `ask image: ${images[0].data}`);
+  } else if (
     /fixture\.txt|round-trip/.test(input) &&
     !input.includes("Pi Pocket history")
   ) {
