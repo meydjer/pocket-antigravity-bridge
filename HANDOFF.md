@@ -2,7 +2,7 @@
 
 ## State
 
-Port of `@firespoon/pi-antigravity-bridge` 1.10.16 (MIT; see `LICENSE`). Installed in `/data/extensions/antigravity-bridge.ts` with helpers in `/data/extensions/antigravity-bridge/`. The live drop-in is **off**. No Pi Pocket settings or source changed.
+Port of `@firespoon/pi-antigravity-bridge` 1.10.16 (MIT; see `LICENSE`). Installed in `~/.pi-pocket/extensions/antigravity-bridge.ts` with helpers in `~/.pi-pocket/extensions/antigravity-bridge/`. The live drop-in is **off**. No Pi Pocket settings or source changed.
 
 ## Turn it on
 
@@ -10,15 +10,15 @@ Port of `@firespoon/pi-antigravity-bridge` 1.10.16 (MIT; see `LICENSE`). Install
 2. Review the code, then turn on **Antigravity Bridge** in **Menu → Extensions**. Run `/agy-status doctor` to check discovery. The provider starts with a fallback list and replaces it when discovery succeeds.
 3. Select `antigravity/gemini-3-8-flash` and a thinking level. On this account, `low`, `medium` and `high` map to the Flash variants. For a second opinion from another provider, use the `antigravity_ask` tool. It takes a text question and has no workspace tools.
 
-Optional config: `/data/antigravity-bridge/config.json`. Default: `{"binary":"agy","sendSystemPrompt":true}`. If the server cannot find `agy`, set `binary` to the absolute executable path. Turn the extension off and on to read new settings. The extension sends the prompt, selected transcript context, and requested tool results to Google. Only enable it for a server where the owner authorizes that use of the account. Do not put secrets in prompts or tool results.
+Optional config: `antigravity-bridge/config.json` in the Pi Pocket data folder. Default: `{"binary":"agy","sendSystemPrompt":true}`. If the server cannot find `agy`, set `binary` to the absolute executable path. Turn the extension off and on to read new settings. The extension sends the prompt, selected transcript context, and requested tool results to Google. Only enable it for a server where the owner authorizes that use of the account. Do not put secrets in prompts or tool results.
 
 ## Checks
 
 Tested with Node 24 and `agy` 1.5.16. In this repo, link the Pi Pocket types and packages if they are not already linked:
 
 ```sh
-ln -s /data/extensions/node_modules node_modules
-ln -s /data/extensions/_pocket.d.ts _pocket.d.ts
+ln -s ~/.pi-pocket/extensions/node_modules node_modules
+ln -s ~/.pi-pocket/extensions/_pocket.d.ts _pocket.d.ts
 npm ci --prefix .toolchain
 npm run check
 ```
