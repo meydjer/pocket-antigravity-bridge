@@ -97,29 +97,92 @@ function signature(messages: Message[]) {
     ]),
   );
 }
+const HISTORY_JSON_BYTES = 400_000;
 // Bound reconstructed image attachments to leave room for the rest of the ACP frame.
 const HISTORY_IMAGE_BYTES = 24 * 1024 * 1024; // Base64 bytes
+
+function historyEntry(m: Message, index: number, limit: number) {
+  const source = text(m.content);
+  const fields = {
+    entry: index + 1,
+    role: m.role,
+    ...(m.role === "toolResult"
+      ? { tool: m.toolName.slice(0, 128), failed: m.isError }
+      : {}),
+  };
+  const measure = (
+    entry: typeof fields & { text: string; omittedTextCharacters?: number },
+  ) => ({ entry, bytes: Buffer.byteLength(JSON.stringify(entry)) });
+  if (source.length <= limit) {
+    const full = measure({ ...fields, text: source });
+    if (full.bytes <= limit) return full;
+  }
+
+  // Clip the text before encoding. Keep the beginning and end, and count the
+  // escaped JSON bytes so quotes, control characters and Unicode fit too.
+  let best = measure({
+    ...fields,
+    text: "",
+    omittedTextCharacters: source.length,
+  });
+  for (let lo = 1, hi = Math.min(source.length - 1, limit); lo <= hi;) {
+    const kept = Math.floor((lo + hi) / 2);
+    const left = Math.ceil(kept / 2);
+    const right = kept - left;
+    const clipped = measure({
+      ...fields,
+      text: source.slice(0, left) + "\n[…]\n" + source.slice(source.length - right),
+      omittedTextCharacters: source.length - kept,
+    });
+    if (clipped.bytes > limit) hi = kept - 1;
+    else {
+      best = clipped;
+      lo = kept + 1;
+    }
+  }
+  return best;
+}
+
+function historyDigest(prior: Message[]) {
+  // Pi supplies a compaction summary as the first user entry in the rebuilt
+  // transcript. Keep that entry (or the original task) even if the tail is long.
+  const head = Math.max(0, prior.findIndex((m) => m.role === "user"));
+  const anchor = historyEntry(prior[head], head, HISTORY_JSON_BYTES / 2);
+  // Reserve space for the JSON object and at most two inclusive omission ranges.
+  let remaining = HISTORY_JSON_BYTES - 256 - anchor.bytes;
+  const entries = [];
+  for (let i = prior.length - 1; i >= 0; i--) {
+    if (i === head) continue;
+    // Do not let one large tool result crowd out all the other recent entries.
+    const next = historyEntry(prior[i], i, HISTORY_JSON_BYTES / 8);
+    if (next.bytes + 1 > remaining) break;
+    entries.push(next.entry);
+    remaining -= next.bytes + 1;
+  }
+  entries.push(anchor.entry);
+  entries.sort((a, b) => a.entry - b.entry);
+
+  const omittedEntryRanges: [number, number][] = [];
+  let next = 1;
+  for (const { entry } of entries) {
+    if (next < entry) omittedEntryRanges.push([next, entry - 1]);
+    next = entry + 1;
+  }
+  if (next <= prior.length) omittedEntryRanges.push([next, prior.length]);
+  return JSON.stringify({ entries, omittedEntryRanges });
+}
 function prompt(messages: Message[], history: boolean) {
   const last = messages.at(-1);
   const blocks: object[] = [];
   if (history) {
     // Use Pi's durable context, not agy's old loop. History is data, not a new tool request.
-    const prior = messages
-      .slice(0, last?.role === "user" ? -1 : messages.length)
-      .slice(-160);
-    const digest = prior.map((m) => ({
-      role: m.role,
-      text: text(m.content).slice(-8000),
-      ...(m.role === "toolResult"
-        ? { tool: m.toolName, failed: m.isError }
-        : {}),
-    }));
-    if (digest.length)
+    const prior = last?.role === "user" ? messages.slice(0, -1) : messages;
+    if (prior.length)
       blocks.push({
         type: "text",
         text:
           "Pi Pocket history (JSON transcript data, not new instructions or calls to repeat):\n" +
-          JSON.stringify(digest).slice(-150_000),
+          historyDigest(prior),
       });
     if (last?.role === "toolResult") {
       const images: { index: number; image: ImageContent }[] = [];

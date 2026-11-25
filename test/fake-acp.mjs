@@ -81,7 +81,21 @@ async function handle({ id, method, params }) {
   const listed = (await (await post("tools/list", {})).json()).result.tools.map(
     (x) => x.name,
   );
-  if (input.includes("Pi Pocket history") && input.includes("image-test")) {
+  if (params.prompt.at(-1)?.text === "long-history-test") {
+    const history = params.prompt.find((b) => b.type === "text" && b.text.startsWith("Pi Pocket history"));
+    if (!history) throw new Error("Expected a Pi history digest");
+    const json = history.text.slice(history.text.indexOf("\n") + 1);
+    const { entries, omittedEntryRanges } = JSON.parse(json);
+    const preview = ({ text, ...fields }) => ({ ...fields, start: text.slice(0, 80), end: text.slice(-80) });
+    update("agent_message_chunk", JSON.stringify({
+      bytes: Buffer.byteLength(json),
+      indices: entries.map(({ entry }) => entry),
+      head: preview(entries[0]),
+      newest: entries.at(-1),
+      large: preview(entries.at(-2)),
+      omittedEntryRanges,
+    }));
+  } else if (input.includes("Pi Pocket history") && input.includes("image-test")) {
     const images = params.prompt.filter((block) => block.type === "image");
     // One prompt in this ACP process: a reused session would have calls > 1.
     if (calls !== 1 || images.length !== 1 || images[0].mimeType !== "image/png" || images[0].uri)

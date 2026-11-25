@@ -178,6 +178,67 @@ for (const slow of [false, true])
     }
   });
 
+for (const compacted of [false, true])
+  test(`ACP restores the ${compacted ? "compaction summary" : "first user task"} and recent history from valid JSON`, async () => {
+    const { bridge, close } = await setup();
+    try {
+      const start = compacted
+        ? "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
+        : "Original task: keep the first message.";
+      const end = compacted ? "\n</summary>" : "End of task.";
+      const escaped = '\n"quoted" \u0000 🌙 \\ line';
+      const anchor = start + escaped.repeat(compacted ? 25_000 : 500) + end;
+      const large = {
+        role: "toolResult",
+        toolName: "read",
+        toolCallId: "old-read",
+        isError: false,
+        timestamp: 0,
+        content: [{
+          type: "text",
+          text: "Beginning of tool result." + escaped.repeat(6_000) + "End of tool result.",
+        }],
+      } satisfies Message;
+      const newest = 'Newest prior message: "🌙"\n\u0000';
+      const prior = [
+        user(anchor),
+        ...Array.from({ length: 200 }, (_, i) => user(`Older message ${i}.` + escaped.repeat(200))),
+        large,
+        user(newest),
+      ];
+      const reply = await bridge.streamSimple(
+        model,
+        transcript([...sys, ...prior, user("long-history-test")]),
+        { sessionId: "long-history" },
+      ).result();
+      assert.equal(reply.stopReason, "stop", reply.errorMessage ?? "");
+      const report = reply.content[0];
+      assert.equal(report.type, "text");
+      const digest = JSON.parse(report.text);
+      assert.ok(digest.bytes > 150_000 && digest.bytes <= 400_000, `Digest bytes: ${digest.bytes}`);
+      assert.equal(digest.head.entry, 1);
+      assert.equal(digest.head.role, "user");
+      assert.equal(digest.head.start, anchor.slice(0, 80));
+      assert.equal(digest.head.end, anchor.slice(-80));
+      assert.equal(Boolean(digest.head.omittedTextCharacters), compacted);
+      assert.deepEqual(digest.newest, { entry: prior.length, role: "user", text: newest });
+      assert.equal(digest.large.start.startsWith("Beginning of tool result."), true);
+      assert.equal(digest.large.end.endsWith("End of tool result."), true);
+      assert.equal(digest.large.tool, "read");
+      assert.equal(digest.large.failed, false);
+      assert.ok(digest.large.omittedTextCharacters > 0);
+      const tailStart = digest.indices[1];
+      assert.ok(tailStart > 2 && tailStart < prior.length - 1);
+      assert.deepEqual(
+        digest.indices.slice(1),
+        Array.from({ length: prior.length - tailStart + 1 }, (_, i) => tailStart + i),
+      );
+      assert.deepEqual(digest.omittedEntryRanges, [[2, tailStart - 1]]);
+    } finally {
+      await close();
+    }
+  });
+
 test("a Pi image result starts a fresh ACP turn with the exact inline image", async () => {
   const { bridge, close } = await setup();
   const opts = { sessionId: "image" };
