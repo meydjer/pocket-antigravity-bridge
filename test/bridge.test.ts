@@ -154,6 +154,13 @@ test("native gate accepts only real offloaded media and uses the hook conversati
       check(call({ Path: path }), "deny");
     for (const args of [{}, { Path: [image] }, { Path: image, StartLine: 1 }, { Path: image, AbsolutePath: image }, { path: image }])
       check(call(args), "deny");
+    // Gemini 4 calls the tool read_file and passes the path as a JSON string literal.
+    const quoted = (path: string) => JSON.stringify({ toolCall: { name: "read_file", args: { Path: JSON.stringify(path) } }, conversationId: id });
+    check(quoted(image), "allow");
+    check(quoted(outside), "deny");
+    check(quoted(step + "/../2/media_0.png"), "deny");
+    check(JSON.stringify({ toolCall: { name: "read_file", args: { Path: '"' + image } }, conversationId: id }), "deny");
+    check(JSON.stringify({ toolCall: { name: "write_file", args: { Path: image } }, conversationId: id }), "deny");
     check('{"toolCall":', "deny");
   } finally {
     await rm(tmp, { recursive: true, force: true });

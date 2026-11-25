@@ -22,8 +22,9 @@ type Spec = Awaited<ReturnType<typeof openMcp>>["spec"];
 const gate = fileURLToPath(new URL("./native-gate.cjs", import.meta.url));
 const shellQuote = (part: string) => "'" + part.replaceAll("'", "'\\''") + "'";
 
-const { allowMedia, markDenial } = createRequire(import.meta.url)(gate) as {
+const { allowMedia, isViewTool, markDenial } = createRequire(import.meta.url)(gate) as {
   allowMedia: (args: unknown, appData: string, stagedAppData: string) => boolean;
+  isViewTool: (name: unknown) => boolean;
   markDenial: (path: string) => void;
 };
 const activeHomes = new Set<string>();
@@ -236,10 +237,11 @@ export async function openAcp(opts: {
           (name === "call_mcp_tool" && input.ServerName === SERVER) ||
           meta.server === SERVER;
         const active = promptActive && p.sessionId === sessionId;
-        const media = name === "view_file" && allowMedia(call.rawInput, appData, stagedAppData);
-        if (active && name === "view_file" && !media) markDenial(denial);
+        const view = isViewTool(name);
+        const media = view && allowMedia(call.rawInput, appData, stagedAppData);
+        if (active && view && !media) markDenial(denial);
         // PreToolUse enforces the hook conversation ID, if agy supplies it.
-        const allowed = active && (name === "view_file" ? media : privateMcp);
+        const allowed = active && (view ? media : privateMcp);
         trace(allowed ? "ACP permission request: allowed" : "ACP permission request: denied");
         const options = Array.isArray(p.options) ? p.options.map(dict) : [];
         const selected = options.find(

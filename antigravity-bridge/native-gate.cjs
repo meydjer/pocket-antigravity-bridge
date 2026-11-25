@@ -4,6 +4,9 @@ const { isAbsolute, join, relative, sep } = require("node:path");
 const PREFIX = "mcp_pi-bridge_";
 const CONVERSATION = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i;
 const MEDIA = /^media_[\w-]+\.(?:png|jpe?g|gif|webp)$/i;
+// agy declares the native tool as `view_file`; Gemini 4 models call it `read_file`.
+const VIEW_TOOLS = new Set(["view_file", "read_file"]);
+const isViewTool = (name) => VIEW_TOOLS.has(name);
 
 function allowMedia(args, appData, stagedAppData, conversationId) {
   if (!args || typeof args !== "object" || Array.isArray(args)) return false;
@@ -11,7 +14,11 @@ function allowMedia(args, appData, stagedAppData, conversationId) {
   // agy's viewFileArgs supports Path and the legacy AbsolutePath. Only a
   // single path, with no line/range or other arguments, is permitted here.
   if (keys.length !== 1 || !["Path", "AbsolutePath"].includes(keys[0])) return false;
-  const input = args[keys[0]];
+  let input = args[keys[0]];
+  // agy can pass the path as a JSON string literal: "\"/abs/path\"". Unwrap once.
+  if (typeof input === "string" && input.length > 1 && input.startsWith('"') && input.endsWith('"')) {
+    try { input = JSON.parse(input); } catch { return false; }
+  }
   if (typeof input !== "string" || !isAbsolute(input) || input.includes("\0") ||
       input.split(sep).some((part) => part === ".." || part === ".")) return false;
   const valid = (root) => {
@@ -48,7 +55,7 @@ async function main() {
     chunks.push(chunk);
   }
   const { toolCall, conversationId } = JSON.parse(Buffer.concat(chunks).toString());
-  if (toolCall?.name === "view_file") {
+  if (isViewTool(toolCall?.name)) {
     // conversationId is in agy's common hook data, not in model arguments.
     const allowed = allowMedia(toolCall.args, appData, stagedAppData, conversationId);
     if (!allowed) markDenial(denial);
@@ -60,7 +67,7 @@ async function main() {
   );
 }
 
-module.exports = { allowMedia, markDenial };
+module.exports = { allowMedia, isViewTool, markDenial };
 if (require.main === module)
   main()
     .catch(() => false)

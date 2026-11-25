@@ -1,6 +1,6 @@
 // Opt-in live test. The default uses a mock and no account or quota.
 import assert from "node:assert/strict";
-import { cp, mkdir, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -24,7 +24,7 @@ const {
 const dataDir = join(root, "data");
 const dropIns = join(dataDir, "extensions");
 const file = "antigravity-bridge.ts";
-const id = live && imageCheck ? "gemini-4-hydrogen" : "gemini-3-8-flash";
+const id = live && imageCheck ? (process.env.AGY_SMOKE_MODEL ?? "gemini-4-hydrogen") : "gemini-3-8-flash";
 const fixture = "synthetic-fixture-content";
 const fixturePath = join(work, "fixture.txt");
 const mockCatalog = join(root, "agy-models");
@@ -51,7 +51,8 @@ await cp(
   { recursive: true },
 );
 await writeFile(fixturePath, fixture + "\n");
-if (imageCheck) await writeFile(join(work, readName), Buffer.from(fixtureImage, "base64"));
+// AGY_SMOKE_IMAGE: a large magenta image (agy offloads large MCP images to media files).
+if (imageCheck) await writeFile(join(work, readName), process.env.AGY_SMOKE_IMAGE ? await readFile(process.env.AGY_SMOKE_IMAGE) : Buffer.from(fixtureImage, "base64"));
 const guard = "fixture-guard.ts";
 await writeFile(
   join(dropIns, guard),
