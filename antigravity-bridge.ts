@@ -6,6 +6,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { arr, obj, opt, str } from "@earendil-works/pi-schema";
+import { removeStaleAcpHomes } from "./antigravity-bridge/acp.ts";
 import { createBridge, type BridgeOptions } from "./antigravity-bridge/provider.ts";
 import { discover, FALLBACK_MODELS, toPiModel, versionStatus } from "./antigravity-bridge/models.ts";
 
@@ -97,6 +98,7 @@ export default async function antigravityBridge(host: Host, web: Web) {
     sendSystemPrompt: cfg.sendSystemPrompt !== false,
     stageDir: join(dir, "work"),
   };
+  await removeStaleAcpHomes(options.stageDir);
   const models = new Map(FALLBACK_MODELS.map((m) => [m.id, m]));
   const bridge = createBridge(options, models);
   const lifecycle = new AbortController();

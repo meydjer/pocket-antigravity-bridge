@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { test } from "node:test";
 import type { Message, TranscriptContext } from "@earendil-works/pi-ai";
 import { createBridge } from "../antigravity-bridge/provider.ts";
+import { removeStaleAcpHomes } from "../antigravity-bridge/acp.ts";
 import {
   entriesFromRaw,
   FALLBACK_MODELS,
@@ -43,6 +44,7 @@ const user = (content: string): Message => ({
 const transcript = (messages: Message[]) => ({ messages }) as TranscriptContext;
 async function setup(pollMs = 500) {
   const dir = await mkdtemp(join(tmpdir(), "pocket-agy-test-"));
+  await mkdir(join(dir, "antigravity-cli"));
   const build = () =>
     createBridge(
       {
@@ -59,6 +61,7 @@ async function setup(pollMs = 500) {
   return {
     bridge,
     build,
+    stageDir: join(dir, "work"),
     async close() {
       bridge.dispose();
       await rm(dir, { recursive: true, force: true });
@@ -111,6 +114,71 @@ test("carrier gate permits private MCP and denies native and foreign calls", () 
     });
     assert.equal(processResult.status, 0, processResult.stderr);
     assert.equal(JSON.parse(processResult.stdout).decision, expected);
+  }
+});
+
+test("native gate accepts only real offloaded media and uses the hook conversation ID", async () => {
+  const tmp = await mkdtemp(join(tmpdir(), "pocket-agy-media-"));
+  try {
+    const id = "12345678-9abc-4def-8999-123456789abc";
+    const otherId = "22345678-9abc-4def-8999-123456789abc";
+    const appData = join(tmp, "app");
+    const alias = join(tmp, "alias");
+    const suffix = join("brain", id, ".system_generated", "steps", "2");
+    const step = join(appData, suffix);
+    const image = join(step, "media_0.png");
+    const outside = join(tmp, "media_0.png");
+    const other = join(appData, "brain", otherId, ".system_generated/steps/2");
+    await mkdir(step, { recursive: true });
+    await mkdir(other, { recursive: true });
+    await symlink(appData, alias);
+    await symlink(outside, join(step, "media_link.png"));
+    await mkdir(join(step, "media_dir.png"));
+    const wrongPaths = [join(step, "image.png"), join(step, "media_0.txt"), join(appData, "media_0.png")];
+    for (const file of [image, outside, join(other, "media_0.png"), ...wrongPaths])
+      await writeFile(file, "fixture");
+    const script = join(import.meta.dirname, "../antigravity-bridge/native-gate.cjs");
+    const check = (input: string, decision: string) => {
+      const result = spawnSync(process.execPath, [script, appData, alias], { input, encoding: "utf8", timeout: 3000 });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(JSON.parse(result.stdout).decision, decision, input);
+    };
+    const call = (args: object, conversationId: unknown = id) =>
+      JSON.stringify({ toolCall: { name: "view_file", args }, conversationId });
+    check(call({ Path: image }), "allow");
+    check(call({ AbsolutePath: join(alias, suffix, "media_0.png") }), "allow");
+    check(JSON.stringify({ toolCall: { name: "view_file", args: { Path: image } } }), "allow");
+    check(call({ Path: image }, otherId), "deny");
+    check(call({ Path: image }, null), "deny");
+    for (const path of [outside, join(other, "media_0.png"), ...wrongPaths, "media_0.png", step + "/../2/media_0.png", step + "/media_link.png", step + "/media_dir.png"])
+      check(call({ Path: path }), "deny");
+    for (const args of [{}, { Path: [image] }, { Path: image, StartLine: 1 }, { Path: image, AbsolutePath: image }, { path: image }])
+      check(call(args), "deny");
+    check('{"toolCall":', "deny");
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("startup cleanup removes only old ACP work folders and does not follow symlinks", async () => {
+  const tmp = await mkdtemp(join(tmpdir(), "pocket-agy-stale-"));
+  try {
+    const stage = join(tmp, "work");
+    const outside = join(tmp, "keep");
+    const stale = join(stage, "acp-Old001");
+    const fresh = join(stage, "acp-New001");
+    const unknown = join(stage, "acp-unrelated");
+    for (const folder of [stale, fresh, unknown, outside]) await mkdir(folder, { recursive: true });
+    await writeFile(join(outside, "keep"), "fixture");
+    await symlink(outside, join(stale, "antigravity-cli"));
+    await symlink(outside, join(stage, "acp-Link01"));
+    const old = new Date(Date.now() - 25 * 60 * 60_000);
+    for (const folder of [stale, unknown, outside]) await utimes(folder, old, old);
+    await removeStaleAcpHomes(stage);
+    assert.deepEqual((await readdir(stage)).sort(), ["acp-Link01", "acp-New001", "acp-unrelated"]);
+    assert.deepEqual(await readdir(outside), ["keep"]);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
   }
 });
 
@@ -239,21 +307,32 @@ for (const compacted of [false, true])
     }
   });
 
-test("a Pi image result starts a fresh ACP turn with the exact inline image", async () => {
-  const { bridge, close } = await setup();
-  const opts = { sessionId: "image" };
-  const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ1sAAAAASUVORK5CYII=";
-  try {
-    const history = [...sys, user("round-trip image-test")];
-    const first = await bridge.streamSimple(model, transcript(history), opts).result();
-    const messages = continuation(history, first, [{ type: "image", mimeType: "image/png", data }]);
-    const answer = await bridge.streamSimple(model, transcript(messages), opts).result();
-    assert.equal(answer.stopReason, "stop", answer.errorMessage ?? "");
-    assert.deepEqual(answer.content, [{ type: "text", text: `inline image: ${data}` }]);
-  } finally {
-    await close();
-  }
-});
+for (const scenario of ["same turn", "gate denial", "restart"]) {
+  test("a Pi image result reaches the model: " + scenario, async () => {
+    const { bridge, build, close, stageDir } = await setup();
+    const opts = { sessionId: "image" };
+    const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ1sAAAAASUVORK5CYII=";
+    const restarted = scenario === "restart" ? build() : undefined;
+    try {
+      const history = [...sys, user("round-trip image-test" + (scenario === "gate denial" ? " deny-media" : ""))];
+      const first = await bridge.streamSimple(model, transcript(history), opts).result();
+      const messages = continuation(history, first, [{ type: "image", mimeType: "image/png", data }]);
+      if (restarted) bridge.dispose();
+      const answer = await (restarted ?? bridge).streamSimple(model, transcript(messages), opts).result();
+      assert.equal(answer.stopReason, "stop", answer.errorMessage ?? "");
+      const prefix = scenario === "same turn" ? "MCP media: " : "inline image: ";
+      assert.deepEqual(answer.content, [{ type: "text", text: prefix + data }]);
+      bridge.dispose();
+      restarted?.dispose();
+      for (let attempt = 0; attempt < 100 && (await readdir(stageDir)).length; attempt++)
+        await wait(20);
+      assert.deepEqual(await readdir(stageDir), []);
+    } finally {
+      restarted?.dispose();
+      await close();
+    }
+  });
+}
 
 test("a compaction during a Pi tool call recovers from Pi history", async () => {
   const { bridge, close } = await setup();

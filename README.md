@@ -5,9 +5,9 @@ A [Pi Pocket](https://github.com/TannerMidd/pi-pocket) drop-in extension that ad
 ## How it works
 
 - It starts the official Antigravity CLI as `agy acp`, the [ACP server that Google documents for other clients](https://antigravity.google/docs/ide/extensions/acp/). Sign-in stays inside `agy`. This extension never reads or copies OAuth tokens.
-- `agy` runs a generated restricted agent with its native tools off.
+- `agy` runs a generated restricted agent. Its only native tool, `view_file`, can read eligible agy media images. See `HANDOFF.md` for the path and conversation checks.
 - Pi's tools reach the agent through an MCP server on `127.0.0.1` with a per-connection token. Each action runs as a normal Pi tool call, so Pi Pocket's cards, permissions, and Lancet Guard apply.
-- Images from Pi tools reach the model: when a tool result has an image, the bridge ends the ACP turn and starts a fresh one from Pi's transcript with the images inline (agy would otherwise offload them to a file path).
+- Images from Pi tools reach agy over MCP in the same ACP turn. If the media read is denied, the bridge can start a fresh turn with the images inline from Pi history.
 - It adds `antigravity_ask`, a second-opinion tool that accepts up to 8 absolute image paths within the current session's local working folder or its uploads folder. The second-opinion model has no workspace tools. It also adds the `/agy-status` command.
 
 Not ported: the TUI pickers and dialogs, the installer, hindsight recall, the native approval gate, and the stream-json engine. See `HANDOFF.md` for details and known gaps.
@@ -31,7 +31,8 @@ ln -s ~/.pi-pocket/extensions/node_modules node_modules
 ln -s ~/.pi-pocket/extensions/_pocket.d.ts _pocket.d.ts
 npm ci --prefix .toolchain
 npm run check            # mocked ACP peer, no quota
-node test/pocket-smoke.mjs --live   # one real turn; uses your quota
+node test/pocket-smoke.mjs --live   # live text check; uses your quota
+PI_POCKET_AGY_TRACE=1 node test/pocket-smoke.mjs --live --image  # live image check; uses your quota
 ```
 
 ## License

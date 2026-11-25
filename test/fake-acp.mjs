@@ -1,7 +1,11 @@
 import { createInterface } from "node:readline";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
+const stage = process.argv[process.argv.indexOf("--gemini-dir") + 1];
+const agentDir = join(stage, "config/agents/pocket-pi-bridge");
+const conversationId = "12345678-9abc-4def-8999-123456789abc";
 let mcp,
   calls = 0,
   prompt;
@@ -35,13 +39,9 @@ async function handle({ id, method, params }) {
   if (method === "initialize") return reply({ protocolVersion: 1 });
   if (method === "session/new") {
     [mcp] = params.mcpServers;
-    const stage = process.argv[process.argv.indexOf("--gemini-dir") + 1];
-    const agent = await readFile(
-      join(stage, "config/agents/pocket-pi-bridge/agent.md"),
-      "utf8",
-    );
+    const agent = await readFile(join(agentDir, "agent.md"), "utf8");
     if (
-      !agent.includes("tools: []") ||
+      !agent.includes("\ntools: [view_file]\n") ||
       !agent.includes(mcp.url) ||
       !agent.includes("excludeDefaultComponents: true")
     )
@@ -107,7 +107,7 @@ async function handle({ id, method, params }) {
       throw new Error("Expected an inline PNG and no tools");
     update("agent_message_chunk", `ask image: ${images[0].data}`);
   } else if (
-    /fixture\.txt|round-trip/.test(input) &&
+    /fixture(?:\.txt|-image\.png)|round-trip/.test(input) &&
     !input.includes("Pi Pocket history")
   ) {
     if (!listed.includes("read") || listed.includes("removed_read"))
@@ -115,13 +115,34 @@ async function handle({ id, method, params }) {
     update("agent_thought_chunk", "Need to read.");
     const invalid = await invoke("removed_read", {});
     if (!invalid.isError) throw new Error("Tool not blocked");
-    let response = await invoke("read", { path: "fixture.txt" });
+    const path = input.includes("fixture-image.png") ? "fixture-image.png" : "fixture.txt";
+    let response = await invoke("read", { path });
     const wait = /^STILL RUNNING.* (agy_[a-f0-9]+)\.$/.exec(
       response.content[0].text,
     );
     if (wait)
       response = await invoke("bridge_poll_result", { callId: wait[1] });
-    update("agent_message_chunk", `read result: ${response.content[0].text}`);
+    const image = response.content.find((b) => b.type === "image");
+    if (image) {
+      const folder = join(stage, "antigravity-cli", "brain", conversationId, ".system_generated/steps/2");
+      await mkdir(folder, { recursive: true });
+      const path = join(folder, "media_0.png");
+      await writeFile(path, Buffer.from(image.data, "base64"));
+      const hooks = JSON.parse(await readFile(join(agentDir, "hooks.json"), "utf8"));
+      const { command } = hooks.hooks.PreToolUse[0].hooks[0];
+      const denied = input.includes("deny-media");
+      if (denied) update("agent_message_chunk", "Discard this partial answer.");
+      const gate = JSON.parse(execFileSync("/bin/sh", ["-c", command], {
+        input: JSON.stringify({ conversationId, toolCall: {
+          name: "view_file", args: { Path: denied ? join(folder, "other.png") : path },
+        } }),
+      }));
+      if (gate.decision !== (denied ? "deny" : "allow")) throw new Error("Wrong media decision");
+      update("agent_message_chunk", denied ? "Discard this denial." :
+        "MCP media: " + (await readFile(path)).toString("base64"));
+    } else {
+      update("agent_message_chunk", `read result: ${response.content[0].text}`);
+    }
   } else {
     update(
       "agent_message_chunk",

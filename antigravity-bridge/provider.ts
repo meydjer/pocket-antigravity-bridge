@@ -360,6 +360,7 @@ class Cell {
   private turn?: {
     request: ReturnType<typeof project>;
     reply?: Reply;
+    retryInline?: () => void;
     handoff?: Handoff;
     queued: Waiting[];
     delivered: Map<string, McpResult>;
@@ -449,7 +450,7 @@ class Cell {
           onUpdate: (u) => this.onUpdate(u),
           instructions: [
             this.options.sendSystemPrompt === false ? "" : request.system,
-            `Pi Pocket protocol: use only tools from the private ${SERVER} server for actions. Use direct mcp_${SERVER}_<tool> or call_mcp_tool with ServerName=${SERVER}, ToolName and Arguments. Do not use any native tools. When a call returns STILL RUNNING, call ${POLL} with that callId until the result arrives. Do not repeat that call.`,
+            `Pi Pocket protocol: use only tools from the private ${SERVER} server for actions. Use direct mcp_${SERVER}_<tool> or call_mcp_tool with ServerName=${SERVER}, ToolName and Arguments. The only native exception is view_file. When a Pi tool returns an image as a media file path, use view_file with only that absolute Path. Do not use it for other files. When a call returns STILL RUNNING, call ${POLL} with that callId until the result arrives. Do not repeat that call.`,
             ...[...request.tools.values()].map((x) => JSON.stringify(x)),
           ].join("\n\n"),
         });
@@ -470,13 +471,14 @@ class Cell {
         this.flush();
       }
     } catch (error) {
-      if (!this.dead) this.close("error", safeError(error));
+      if (!this.dead && !this.retryDeniedMedia()) this.close("error", safeError(error));
     }
   }
   resume(
     reply: Reply,
     request: ReturnType<typeof project>,
-    opts?: SimpleStreamOptions,
+    opts: SimpleStreamOptions | undefined,
+    retryInline: () => void,
   ) {
     const t = this.turn;
     if (!t || t.reply || !t.handoff) return false;
@@ -489,20 +491,35 @@ class Cell {
     )
       return false;
     if (last.content.some((block) => block.type === "image")) {
-      // agy offloads MCP images to paths. End this ACP turn and resume from Pi's
-      // transcript with inline ACP image blocks instead of granting native reads.
-      this.close();
-      return false;
+      try {
+        if (!this.acp?.alive) return false;
+        this.acp.resetMediaDenial();
+      } catch {
+        return false;
+      }
+      t.retryInline = retryInline;
     }
     this.usedAt = Date.now();
+    this.attach(reply, opts);
+    if (this.dead) return true;
     clearTimeout(h.timer);
     t.request = request;
     t.handoff = undefined;
     const actual: McpResult = { content: last.content, isError: last.isError };
     if (h.acknowledged) t.delivered.set(h.id, actual);
     else h.resolve(actual);
-    this.attach(reply, opts);
     this.flush();
+    return true;
+  }
+  private retryDeniedMedia() {
+    const t = this.turn;
+    if (!t?.retryInline || !t.reply || !this.acp?.mediaDenied()) return false;
+    trace("ACP media read denied: recovering with inline Pi images");
+    t.reply.onEnd?.();
+    t.reply.onEnd = undefined;
+    t.reply = undefined;
+    this.close();
+    t.retryInline();
     return true;
   }
   private attach(reply: Reply, opts?: SimpleStreamOptions) {
@@ -525,7 +542,8 @@ class Cell {
           : undefined;
     const b = dict(update.content);
     if (!type || b.type !== "text" || typeof b.text !== "string") return;
-    if (t.reply) t.reply.delta(type, b.text);
+    if (this.retryDeniedMedia()) return;
+    if (t.reply && !t.retryInline) t.reply.delta(type, b.text);
     else {
       t.bufferedSize += b.text.length;
       if (t.bufferedSize > 1024 * 1024 || t.buffered.length > 12_000)
@@ -547,11 +565,16 @@ class Cell {
   }
   private flush() {
     const t = this.turn;
-    if (!t || !t.reply) return;
+    if (!t || !t.reply || this.retryDeniedMedia()) return;
     const reply = t.reply;
-    for (const b of t.buffered) reply.delta(b.type, b.delta);
-    t.buffered = [];
-    t.bufferedSize = 0;
+    const releaseOutput = () => {
+      // Do not publish a partial answer that an inline retry must replace.
+      t.retryInline = undefined;
+      for (const b of t.buffered) reply.delta(b.type, b.delta);
+      t.buffered = [];
+      t.bufferedSize = 0;
+    };
+    if (!t.retryInline || t.final) releaseOutput();
     if (t.final) {
       const stop = t.final.stopReason;
       if (
@@ -599,6 +622,7 @@ class Cell {
         );
         continue;
       }
+      releaseOutput();
       const call: ToolCall = {
         type: "toolCall",
         id: `agy_${randomUUID().replaceAll("-", "")}`,
@@ -665,12 +689,28 @@ export function createBridge(
         (request.messages.at(-1)?.role === "user" && !request.tools.size
           ? ":plain"
           : "");
+      const start = (cell: Cell) => {
+        void cell.run(reply, request, pick, opts).finally(() => {
+          if ((!opts?.sessionId || cell.dead) && cells.get(stateKey) === cell) {
+            cell.close();
+            cells.delete(stateKey);
+          }
+        });
+      };
       let cell = cells.get(stateKey);
       if (cell?.busy) {
-        if (cell.resume(reply, request, opts)) return reply.stream;
-        // The live ACP turn no longer matches Pi's transcript: an image handoff,
-        // a compaction during a tool call, an edited history, or an interrupted
-        // turn. Pi's durable transcript is the truth, so restart from it.
+        const busy = cell;
+        if (busy.resume(reply, request, opts, () => {
+          if (disposed || cells.get(stateKey) !== busy) {
+            reply.finish("aborted", "Antigravity bridge closed.");
+            return;
+          }
+          const fresh = new Cell(busy.profile, options);
+          cells.set(stateKey, fresh);
+          start(fresh);
+        })) return reply.stream;
+        // The live ACP turn no longer matches Pi's transcript after compaction,
+        // an edit, or an interruption. Restart from Pi's durable transcript.
         trace("ACP handoff mismatch: recovering from Pi history");
         cell.close();
         cells.delete(stateKey);
@@ -713,12 +753,7 @@ export function createBridge(
         cell = new Cell(profile, options);
         cells.set(stateKey, cell);
       }
-      void cell.run(reply, request, pick, opts).finally(() => {
-        if ((!opts?.sessionId || cell.dead) && cells.get(stateKey) === cell) {
-          cell.close();
-          cells.delete(stateKey);
-        }
-      });
+      start(cell);
     } catch (error) {
       reply.finish(
         "error",

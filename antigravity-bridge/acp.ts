@@ -1,13 +1,17 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync, rmSync } from "node:fs";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
+  readdir,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { JsonRpcSession, JsonRpcResponseError } from "./jsonrpc.ts";
@@ -17,6 +21,36 @@ const AGENT = "pocket-pi-bridge";
 type Spec = Awaited<ReturnType<typeof openMcp>>["spec"];
 const gate = fileURLToPath(new URL("./native-gate.cjs", import.meta.url));
 const shellQuote = (part: string) => "'" + part.replaceAll("'", "'\\''") + "'";
+
+const { allowMedia, markDenial } = createRequire(import.meta.url)(gate) as {
+  allowMedia: (args: unknown, appData: string, stagedAppData: string) => boolean;
+  markDenial: (path: string) => void;
+};
+const activeHomes = new Set<string>();
+const DAY_MS = 24 * 60 * 60_000;
+
+export async function removeStaleAcpHomes(stageDir: string) {
+  const root = resolve(stageDir);
+  try {
+    if (!(await lstat(root)).isDirectory()) return;
+    const cutoff = Date.now() - DAY_MS;
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^acp-[a-zA-Z0-9]{6}$/.test(entry.name)) continue;
+      const path = join(root, entry.name);
+      if (activeHomes.has(path)) continue;
+      try {
+        const info = await lstat(path);
+        if (info.isDirectory() && info.mtimeMs < cutoff)
+          await rm(path, { recursive: true, force: true });
+      } catch {
+        trace("Could not remove a stale ACP work folder");
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+      trace("Could not check for stale ACP work folders");
+  }
+}
 
 export function safeError(error: unknown) {
   if (error instanceof JsonRpcResponseError) {
@@ -40,8 +74,19 @@ export async function openAcp(opts: {
   onUpdate: (update: Record<string, unknown>) => void;
   signal: AbortSignal;
 }) {
-  await mkdir(opts.stageDir, { recursive: true, mode: 0o700 });
-  const home = await mkdtemp(join(opts.stageDir, "acp-"));
+  const stageDir = resolve(opts.stageDir);
+  await mkdir(stageDir, { recursive: true, mode: 0o700 });
+  const home = await mkdtemp(join(stageDir, "acp-"));
+  activeHomes.add(home);
+  const denial = join(home, "media-denied");
+  let cleaning = false;
+  function removeHome() {
+    if (cleaning) return;
+    cleaning = true;
+    void rm(home, { recursive: true, force: true, maxRetries: 3 })
+      .catch(() => trace("Could not remove the ACP work folder"))
+      .finally(() => activeHomes.delete(home));
+  }
   let proc: ChildProcessWithoutNullStreams | undefined;
   let rpc: JsonRpcSession | undefined;
   let closed = false;
@@ -58,7 +103,7 @@ export async function openAcp(opts: {
     } catch {
       /* already gone */
     }
-    if (proc) {
+    if (proc && proc.exitCode === null && proc.signalCode === null) {
       killTimer = setTimeout(() => {
         try {
           proc?.kill("SIGKILL");
@@ -67,21 +112,20 @@ export async function openAcp(opts: {
         }
       }, 2000);
       killTimer.unref();
+    } else {
+      removeHome();
     }
-    void rm(home, { recursive: true, force: true }).catch(() => {});
   }
   try {
     await chmod(home, 0o700);
     const cwd = join(home, "workspace");
     const agentDir = join(home, "config", "agents", AGENT);
-    const appData = join(
-      opts.geminiDir ?? join(homedir(), ".gemini"),
-      "antigravity-cli",
-    );
+    const appData = resolve(opts.geminiDir ?? join(homedir(), ".gemini"), "antigravity-cli");
+    const stagedAppData = join(home, "antigravity-cli");
     // Only agy's own application data is shared for sign-in. Do not copy global agents, hooks, or MCP config.
     await mkdir(cwd, { mode: 0o700 });
     await mkdir(agentDir, { recursive: true, mode: 0o700 });
-    await symlink(appData, join(home, "antigravity-cli"), "dir");
+    await symlink(appData, stagedAppData, "dir");
     await writeFile(
       join(home, "config", "mcp_config.json"),
       '{"mcpServers":{}}',
@@ -97,7 +141,7 @@ export async function openAcp(opts: {
               hooks: [
                 {
                   type: "command",
-                  command: `${shellQuote(process.execPath)} ${shellQuote(gate)}`,
+                  command: [process.execPath, gate, appData, stagedAppData, denial].map(shellQuote).join(" "),
                   timeout: 3,
                 },
               ],
@@ -119,7 +163,7 @@ export async function openAcp(opts: {
         "excludeDefaultComponents: true",
         "inheritCustomizations: false",
         "inheritMcp: true",
-        "tools: []",
+        "tools: [view_file]",
         "skills: []",
         "rules: []",
         "agents: []",
@@ -191,8 +235,12 @@ export async function openAcp(opts: {
           (typeof name === "string" && name.startsWith(`mcp_${SERVER}_`)) ||
           (name === "call_mcp_tool" && input.ServerName === SERVER) ||
           meta.server === SERVER;
-        const allowed = promptActive && p.sessionId === sessionId && privateMcp;
-        trace(`ACP permission request: ${allowed ? "private MCP" : "denied"}`);
+        const active = promptActive && p.sessionId === sessionId;
+        const media = name === "view_file" && allowMedia(call.rawInput, appData, stagedAppData);
+        if (active && name === "view_file" && !media) markDenial(denial);
+        // PreToolUse enforces the hook conversation ID, if agy supplies it.
+        const allowed = active && (name === "view_file" ? media : privateMcp);
+        trace(allowed ? "ACP permission request: allowed" : "ACP permission request: denied");
         const options = Array.isArray(p.options) ? p.options.map(dict) : [];
         const selected = options.find(
           (o) =>
@@ -214,10 +262,14 @@ export async function openAcp(opts: {
       .setEncoding("utf8")
       .on("data", (chunk: string) => transport.feed(chunk));
     child.on("error", close);
-    child.on("close", () => {
+    // Wait for agy to stop so that it cannot recreate its work folder.
+    const reap = () => {
       close();
       clearTimeout(killTimer);
-    });
+      removeHome();
+    };
+    child.once("exit", reap);
+    child.once("close", reap);
     const cancelStart = () => close();
     opts.signal.addEventListener("abort", cancelStart, { once: true });
     try {
@@ -253,6 +305,12 @@ export async function openAcp(opts: {
       close,
       get alive() {
         return !closed;
+      },
+      resetMediaDenial() {
+        rmSync(denial, { force: true });
+      },
+      mediaDenied() {
+        return existsSync(denial);
       },
       async prompt(blocks: object[], model: string, effort?: string) {
         await transport.request(

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const live = process.argv.includes("--live");
+const imageCheck = process.argv.includes("--image");
 const pocket =
   process.env.PI_POCKET_SOURCE ??
   join(process.env.HOME, ".local/share/pi-pocket-source");
@@ -23,12 +24,14 @@ const {
 const dataDir = join(root, "data");
 const dropIns = join(dataDir, "extensions");
 const file = "antigravity-bridge.ts";
-const id = "gemini-3-8-flash";
+const id = live && imageCheck ? "gemini-4-hydrogen" : "gemini-3-8-flash";
 const fixture = "synthetic-fixture-content";
 const fixturePath = join(work, "fixture.txt");
 const mockCatalog = join(root, "agy-models");
 const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ1sAAAAASUVORK5CYII=";
 const imagePath = join(work, "fixture.png");
+const fixtureImage = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAdklEQVR4nO3PQQkAMAzAwPo33Yno4xgEIuAyO/t1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWHHtBp+HSthEAJgAAAABJRU5ErkJggg==";
+const readName = imageCheck ? "fixture-image.png" : "fixture.txt";
 const outsideDir = `${work}-outside`;
 const outsideImage = join(outsideDir, "fixture.png");
 const linkedImage = join(work, "linked.png");
@@ -48,13 +51,14 @@ await cp(
   { recursive: true },
 );
 await writeFile(fixturePath, fixture + "\n");
+if (imageCheck) await writeFile(join(work, readName), Buffer.from(fixtureImage, "base64"));
 const guard = "fixture-guard.ts";
 await writeFile(
   join(dropIns, guard),
   `
     import { defineExtension, hook, ToolTask, GenerationTask } from "@earendil-works/pi-durable";
     export default () => defineExtension({ name: "fixture-guard", hooks: [
-        hook(ToolTask, { beforeTool: (call) => (call.name === "read" && call.arguments.path === "fixture.txt")
+        hook(ToolTask, { beforeTool: (call) => (call.name === "read" && call.arguments.path === ${JSON.stringify(readName)})
             || (${!live} && call.name === "antigravity_ask")
             ? undefined : { block: "Tool not permitted in this test." } }),
         hook(GenerationTask, { beforeRequest: ({ messages }) => ({ messages: messages.map((m) =>
@@ -68,6 +72,7 @@ await mkdir(conf);
 let binary = process.env.AGY_BINARY ?? "agy";
 if (!live) {
   process.env.HOME = join(root, "home");
+  await mkdir(join(process.env.HOME, ".gemini/antigravity-cli"), { recursive: true });
   binary = join(root, "fake-agy");
   await writeFile(mockCatalog, "gemini-3.8-flash-medium\ngemini-3.8-flash-low\n");
   await mkdir(outsideDir);
@@ -130,7 +135,9 @@ try {
   );
   await loadTools(app, conversation, "read");
   const { submissionId } = await app.commands.submit(conversation, owner(app), {
-    text: "Use the Pi read tool once on fixture.txt (relative path). Report its exact contents. Do not call any other tools or read anything else.",
+    text: imageCheck
+      ? "Use the Pi read tool once on fixture-image.png (relative path). Name the solid color in the image. If the result is a media path, use view_file only on that path. Do not read any other files."
+      : "Use the Pi read tool once on fixture.txt (relative path). Report its exact contents. Do not call any other tools or read anything else.",
     requestId: crypto.randomUUID(),
   });
   const settled = await (
@@ -160,12 +167,18 @@ try {
     });
   assert.equal(reads.length, 1);
   assert.equal(reads[0].isError, false);
-  assert.match(JSON.stringify(reads[0].content), new RegExp(fixture));
   assert.equal(answer.stopReason, "stop");
-  assert.match(JSON.stringify(answer.content), new RegExp(fixture));
-  console.log(
-    `${live ? "Live Gemini Flash (low)" : "Mocked ACP"}: 1 Pi read tool result; final answer contains ${fixture}.`,
-  );
+  if (imageCheck) {
+    assert.ok(reads[0].content.some((block) => block.type === "image"));
+    const text = answer.content.filter((block) => block.type === "text").map((block) => block.text).join("");
+    if (live) assert.match(text, /magenta|fuchsia/i);
+    else assert.match(text, /^MCP media: /);
+    console.log("Image check passed: one Pi read and a matching answer.");
+  } else {
+    assert.match(JSON.stringify(reads[0].content), new RegExp(fixture));
+    assert.match(JSON.stringify(answer.content), new RegExp(fixture));
+    console.log("Text check passed: one Pi read and a matching answer.");
+  }
   if (!live) {
     const wrongFolder = /Images must be inside this session/i;
     for (const [label, guidance] of [
